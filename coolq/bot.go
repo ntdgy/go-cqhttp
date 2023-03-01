@@ -367,8 +367,8 @@ func (bot *CQBot) SendPrivateMessage(target int64, groupID int64, m *message.Sen
 		switch {
 		case groupID != 0 && bot.Client.FindGroup(groupID) == nil:
 			log.Errorf("错误: 找不到群(%v)", groupID)
-		case groupID != 0 && !bot.Client.FindGroup(groupID).AdministratorOrOwner():
-			log.Errorf("错误: 机器人在群(%v) 为非管理员或群主, 无法主动发起临时会话", groupID)
+		// case groupID != 0 && !bot.Client.FindGroup(groupID).AdministratorOrOwner():
+		// 	log.Errorf("错误: 机器人在群(%v) 为非管理员或群主, 无法主动发起临时会话", groupID)
 		case groupID != 0 && bot.Client.FindGroup(groupID).FindMember(target) == nil:
 			log.Errorf("错误: 群员(%v) 不在 群(%v), 无法发起临时会话", target, groupID)
 		default:
