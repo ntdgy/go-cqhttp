@@ -14,24 +14,18 @@ import (
 
 	"github.com/Mrs4s/MiraiGo/client"
 	"github.com/Mrs4s/MiraiGo/utils"
-	"github.com/Mrs4s/MiraiGo/wrapper"
+	"github.com/Mrs4s/go-cqhttp/internal/base"
 	"github.com/mattn/go-colorable"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"gopkg.ilharper.com/x/isatty"
 
-	"github.com/Mrs4s/go-cqhttp/internal/base"
-
 	"github.com/Mrs4s/go-cqhttp/global"
 	"github.com/Mrs4s/go-cqhttp/internal/download"
 )
 
 var console = bufio.NewReader(os.Stdin)
-
-func init() {
-	wrapper.DandelionEnergy = energy
-}
 
 func readLine() (str string) {
 	str, _ = console.ReadString('\n')
@@ -216,8 +210,13 @@ func loginResponseProcessor(res *client.LoginResponse) error {
 		case client.OtherLoginError, client.UnknownLoginError, client.TooManySMSRequestError:
 			msg := res.ErrorMessage
 			log.Warnf("登录失败: %v Code: %v", msg, res.Code)
-			if res.Code == 235 {
-				log.Warnf("请删除 device.json 后重试.")
+			switch res.Code {
+			case 235:
+				log.Warnf("设备信息被封禁, 请删除 device.json 后重试.")
+			case 237:
+				log.Warnf("登录过于频繁, 请在手机QQ登录并根据提示完成认证后等一段时间重试")
+			case 45:
+				log.Warnf("你的账号被限制登录, 请配置 SignServer 后重试")
 			}
 			log.Infof("按 Enter 继续....")
 			readLine()
@@ -266,26 +265,48 @@ func fetchCaptcha(id string) string {
 	return ""
 }
 
-func energy(uin uint64, id string, salt []byte) ([]byte, error) {
-	// temporary solution
-	signServer := "https://captcha.go-cqhttp.org/sdk/dandelion/energy"
-	if base.SignServerOverwrite != "" {
-		signServer = base.SignServerOverwrite
+func energy(uin uint64, id string, appVersion string, salt []byte) ([]byte, error) {
+	signServer := base.SignServer
+	if !strings.HasSuffix(signServer, "/") {
+		signServer += "/"
+	}
+	response, err := download.Request{
+		Method: http.MethodGet,
+		URL:    signServer + "custom_energy" + fmt.Sprintf("?data=%v&salt=%v", id, hex.EncodeToString(salt)),
+	}.Bytes()
+	if err != nil {
+		log.Warnf("获取T544 sign时出现错误: %v server: %v", err, signServer)
+		return nil, err
+	}
+	data, err := hex.DecodeString(gjson.GetBytes(response, "data").String())
+	if err != nil {
+		log.Warnf("获取T544 sign时出现错误: %v", err)
+		return nil, err
+	}
+	if len(data) == 0 {
+		log.Warnf("获取T544 sign时出现错误: %v", "data is empty")
+		return nil, errors.New("data is empty")
+	}
+	return data, nil
+}
+
+func sign(seq uint64, uin string, cmd string, qua string, buff []byte) (sign []byte, extra []byte, token []byte, err error) {
+	signServer := base.SignServer
+	if !strings.HasSuffix(signServer, "/") {
+		signServer += "/"
 	}
 	response, err := download.Request{
 		Method: http.MethodPost,
-		URL:    signServer,
+		URL:    signServer + "sign",
 		Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
-		Body:   bytes.NewReader([]byte(fmt.Sprintf("uin=%v&id=%s&salt=%s", uin, id, hex.EncodeToString(salt)))),
+		Body:   bytes.NewReader([]byte(fmt.Sprintf("uin=%v&qua=%s&cmd=%s&seq=%v&buffer=%v", uin, qua, cmd, seq, hex.EncodeToString(buff)))),
 	}.Bytes()
 	if err != nil {
-		log.Errorf("获取T544时出现问题: %v", err)
-		return nil, err
+		log.Warnf("获取sso sign时出现错误: %v server: %v", err, signServer)
+		return nil, nil, nil, err
 	}
-	sign, err := hex.DecodeString(gjson.GetBytes(response, "result").String())
-	if err != nil {
-		log.Errorf("获取T544时出现问题: %v", err)
-		return nil, err
-	}
-	return sign, nil
+	sign, _ = hex.DecodeString(gjson.GetBytes(response, "data.sign").String())
+	extra, _ = hex.DecodeString(gjson.GetBytes(response, "data.extra").String())
+	token, _ = hex.DecodeString(gjson.GetBytes(response, "data.token").String())
+	return sign, extra, token, nil
 }

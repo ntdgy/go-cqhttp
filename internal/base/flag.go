@@ -37,7 +37,9 @@ var (
 	LogColorful         bool   // 是否启用日志颜色
 	FastStart           bool   // 是否为快速启动
 	AllowTempSession    bool   // 是否允许发送临时会话信息
-	SignServerOverwrite string // 使用特定的服务器进行签名
+	UpdateProtocol      bool   // 是否更新协议
+	SignServer          string // 使用特定的服务器进行签名
+	HTTPTimeout         int
 
 	PostFormat        string                 // 上报格式 string or array
 	Proxy             string                 // 存储 proxy_rewrite,用于设置代理
@@ -61,7 +63,7 @@ func Parse() {
 	flag.StringVar(&LittleWD, "w", "", "cover the working directory")
 	d := flag.Bool("D", false, "debug mode")
 	flag.BoolVar(&FastStart, "faststart", false, "skip waiting 5 seconds")
-	flag.StringVar(&SignServerOverwrite, "sign-server", "", "use special server to sign tlv")
+	flag.BoolVar(&UpdateProtocol, "update-protocol", false, "update protocol")
 	flag.Parse()
 
 	if *d {
@@ -86,6 +88,8 @@ func Init() {
 		ReportSelfMessage = conf.Message.ReportSelfMessage
 		UseSSOAddress = conf.Account.UseSSOAddress
 		AllowTempSession = conf.Account.AllowTempSession
+		SignServer = conf.Account.SignServer
+		HTTPTimeout = conf.Message.HTTPTimeout
 	}
 	{ // others
 		Proxy = conf.Message.ProxyRewrite
