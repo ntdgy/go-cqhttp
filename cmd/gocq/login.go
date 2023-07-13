@@ -3,9 +3,11 @@ package gocq
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"image"
 	"image/png"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -15,7 +17,10 @@ import (
 	"github.com/mattn/go-colorable"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"gopkg.ilharper.com/x/isatty"
+
+	"github.com/Mrs4s/go-cqhttp/internal/base"
 
 	"github.com/Mrs4s/go-cqhttp/global"
 	"github.com/Mrs4s/go-cqhttp/internal/download"
@@ -153,24 +158,15 @@ func loginResponseProcessor(res *client.LoginResponse) error {
 		var text string
 		switch res.Error {
 		case client.SliderNeededError:
-			log.Warnf("登录需要滑条验证码, 请选择验证方式: ")
-			log.Warnf("1. 使用浏览器抓取滑条并登录")
-			log.Warnf("2. 使用手机QQ扫码验证 (需要手Q和gocq在同一网络下).")
-			log.Warn("请输入(1 - 2)：")
-			text = readIfTTY("1")
-			if strings.Contains(text, "1") {
-				ticket := getTicket(res.VerifyUrl)
-				if ticket == "" {
-					os.Exit(0)
-				}
-				res, err = cli.SubmitTicket(ticket)
-				continue
+			log.Warnf("登录需要滑条验证码, 请验证后重试.")
+			ticket := getTicket(res.VerifyUrl)
+			if ticket == "" {
+				log.Infof("按 Enter 继续....")
+				readLine()
+				os.Exit(0)
 			}
-			cli.Disconnect()
-			cli.Release()
-			cli = client.NewClientEmpty()
-			cli.UseDevice(device)
-			return qrcodeLogin()
+			res, err = cli.SubmitTicket(ticket)
+			continue
 		case client.NeedCaptcha:
 			log.Warnf("登录需要验证码.")
 			_ = os.WriteFile("captcha.jpg", res.CaptchaImage, 0o644)
@@ -214,14 +210,17 @@ func loginResponseProcessor(res *client.LoginResponse) error {
 			os.Exit(0)
 		case client.OtherLoginError, client.UnknownLoginError, client.TooManySMSRequestError:
 			msg := res.ErrorMessage
-			if strings.Contains(msg, "版本") {
-				msg = "密码错误或账号被冻结"
-			} else if strings.Contains(msg, "冻结") {
-				log.Fatalf("账号被冻结")
+			log.Warnf("登录失败: %v Code: %v", msg, res.Code)
+			switch res.Code {
+			case 235:
+				log.Warnf("设备信息被封禁, 请删除 device.json 后重试.")
+			case 237:
+				log.Warnf("登录过于频繁, 请在手机QQ登录并根据提示完成认证后等一段时间重试")
+			case 45:
+				log.Warnf("你的账号被限制登录, 请配置 SignServer 后重试")
 			}
-			log.Warnf("登录失败: %v", msg)
-			log.Infof("按 Enter 或等待 5s 后继续....")
-			readLineTimeout(time.Second * 5)
+			log.Infof("按 Enter 继续....")
+			readLine()
 			os.Exit(0)
 		}
 	}
@@ -265,4 +264,80 @@ func fetchCaptcha(id string) string {
 		return g.Get("ticket").String()
 	}
 	return ""
+}
+
+func energy(uin uint64, id string, _ string, salt []byte) ([]byte, error) {
+	signServer := base.SignServer
+	if !strings.HasSuffix(signServer, "/") {
+		signServer += "/"
+	}
+	req := download.Request{
+		Method: http.MethodGet,
+		URL:    signServer + "custom_energy" + fmt.Sprintf("?data=%v&salt=%v&uin=%v", id, hex.EncodeToString(salt), uin),
+	}
+	if base.IsBelow110 {
+		req.URL = signServer + "custom_energy" + fmt.Sprintf("?data=%v&salt=%v", id, hex.EncodeToString(salt))
+	}
+	response, err := req.Bytes()
+	if err != nil {
+		log.Warnf("获取T544 sign时出现错误: %v server: %v", err, signServer)
+		return nil, err
+	}
+	data, err := hex.DecodeString(gjson.GetBytes(response, "data").String())
+	if err != nil {
+		log.Warnf("获取T544 sign时出现错误: %v", err)
+		return nil, err
+	}
+	if len(data) == 0 {
+		log.Warnf("获取T544 sign时出现错误: %v", "data is empty")
+		return nil, errors.New("data is empty")
+	}
+	return data, nil
+}
+
+func sign(seq uint64, uin string, cmd string, qua string, buff []byte) (sign []byte, extra []byte, token []byte, err error) {
+	signServer := base.SignServer
+	if !strings.HasSuffix(signServer, "/") {
+		signServer += "/"
+	}
+	response, err := download.Request{
+		Method: http.MethodPost,
+		URL:    signServer + "sign",
+		Header: map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		Body:   bytes.NewReader([]byte(fmt.Sprintf("uin=%v&qua=%s&cmd=%s&seq=%v&buffer=%v", uin, qua, cmd, seq, hex.EncodeToString(buff)))),
+	}.Bytes()
+	if err != nil {
+		log.Warnf("获取sso sign时出现错误: %v server: %v", err, signServer)
+		return nil, nil, nil, err
+	}
+	sign, _ = hex.DecodeString(gjson.GetBytes(response, "data.sign").String())
+	extra, _ = hex.DecodeString(gjson.GetBytes(response, "data.extra").String())
+	token, _ = hex.DecodeString(gjson.GetBytes(response, "data.token").String())
+	return sign, extra, token, nil
+}
+
+func register(uin int64, androidID, guid []byte, qimei36, key string) {
+	if base.IsBelow110 {
+		log.Warn("签名服务器版本低于1.1.0, 跳过实例注册")
+		return
+	}
+	signServer := base.SignServer
+	if !strings.HasSuffix(signServer, "/") {
+		signServer += "/"
+	}
+	resp, err := download.Request{
+		Method: http.MethodGet,
+		URL: signServer + "register" + fmt.Sprintf("?uin=%v&android_id=%v&guid=%v&qimei36=%v&key=%s",
+			uin, hex.EncodeToString(androidID), hex.EncodeToString(guid), qimei36, key),
+	}.Bytes()
+	if err != nil {
+		log.Warnf("注册QQ实例时出现错误: %v server: %v", err, signServer)
+		return
+	}
+	msg := gjson.GetBytes(resp, "msg")
+	if gjson.GetBytes(resp, "code").Int() != 0 {
+		log.Warnf("注册QQ实例时出现错误: %v server: %v", msg, signServer)
+		return
+	}
+	log.Infof("注册QQ实例 %v 成功: %v", uin, msg)
 }
